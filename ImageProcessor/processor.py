@@ -5,6 +5,7 @@ import mimetypes
 import asyncio
 import multiprocessing
 from .resizer import Resizer
+from .cropper import Cropper
 from .compressor import Compressor
 from .progress_bar import ProgressBar
 from .logger import Logger
@@ -19,6 +20,7 @@ class Processor:
                  directory: str = '',
                  max_width: int = None,
                  max_height: int = None,
+                 ratio: float = None,
                  tiny_png_api_key: list or str = None,
                  write_log: bool = False):
         self.directory: str = directory
@@ -28,12 +30,14 @@ class Processor:
         else:
             self.logger: None = None
         self.resizer: Resizer = Resizer(output_directory, max_width, max_height, logger=self.logger)
+        self.cropper: Cropper = Cropper(output_directory, ratio, self.logger)
         if tiny_png_api_key is not None:
             self.compressor: Compressor = Compressor(tiny_png_api_key, logger=self.logger)
 
-    def resize_all(self) -> list:
-        files: list = list(filter(self.is_image, os.listdir(self.directory)))
-        files = list(map(lambda f: f'{self.directory}/{f}', files))
+    def resize_all(self, files: list = None) -> list:
+        if files is None:
+            files: list = list(filter(self.is_image, os.listdir(self.directory)))
+            files = list(map(lambda f: f'{self.directory}/{f}', files))
         if self.logger is not None:
             self.logger.start_resizing(len(files), self.get_overall_size(files))
         print('Resize in progress...')
@@ -55,11 +59,37 @@ class Processor:
             self.logger.stop_resizing(overall_output_weight)
         return output_files
 
+    def crop_all(self, files: list = None):
+        if files is None:
+            files: list = list(filter(self.is_image, os.listdir(self.directory)))
+            files = list(map(lambda f: f'{self.directory}/{f}', files))
+        if self.logger is not None:
+            self.logger.start_cropping(len(files), self.get_overall_size(files))
+        print('Crop in progress...')
+        self.progress: ProgressBar = ProgressBar(len(files))
+        self.progress.show()
+        output_files: list = []
+        results: list = []
+        pool: multiprocessing.Pool = multiprocessing.Pool()
+        overall_output_weight: int = 0
+        for file in files:
+            results.append(pool.apply_async(self.cropper.crop_image, (file,)))
+        for result in results:
+            file: str = result.get(timeout=10)
+            self.progress.inc()
+            self.progress.show()
+            overall_output_weight += os.path.getsize(file)
+            output_files.append(file)
+        if self.logger is not None:
+            self.logger.stop_cropping(overall_output_weight)
+        return output_files
+
     def compress_all(self, files: list = None):
         if not hasattr(self, 'compressor'):
             raise AttributeError('"tiny_png_api_key" must be defined when instantiating "Processor" class.')
         if files is None:
             files: list = list(filter(self.is_image, os.listdir(self.directory)))
+            files = list(map(lambda f: f'{self.directory}/{f}', files))
         files = self.__validate_files_to_compress(files)
         if self.logger is not None:
             self.logger.start_compressing(len(files), self.get_overall_size(files))
