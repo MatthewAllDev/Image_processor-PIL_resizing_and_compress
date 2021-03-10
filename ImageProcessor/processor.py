@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing
 from .resizer import Resizer
 from .cropper import Cropper
+from .paster import Paster
 from .compressor import Compressor
 from .progress_bar import ProgressBar
 from .logger import Logger
@@ -31,10 +32,11 @@ class Processor:
             self.logger: None = None
         self.resizer: Resizer = Resizer(output_directory, max_width, max_height, logger=self.logger)
         self.cropper: Cropper = Cropper(output_directory, ratio, self.logger)
+        self.paster: Paster = Paster(output_directory, ratio, self.logger)
         if tiny_png_api_key is not None:
             self.compressor: Compressor = Compressor(tiny_png_api_key, logger=self.logger)
 
-    def resize_all(self, files: list = None) -> list:
+    def resize_all(self, files: list = None, max_width: int = None, max_height: int = None) -> list:
         if files is None:
             files: list = list(filter(self.is_image, os.listdir(self.directory)))
             files = list(map(lambda f: f'{self.directory}/{f}', files))
@@ -48,7 +50,7 @@ class Processor:
         pool: multiprocessing.Pool = multiprocessing.Pool()
         overall_output_weight: int = 0
         for file in files:
-            results.append(pool.apply_async(self.resizer.resize, (file,)))
+            results.append(pool.apply_async(self.resizer.resize, (file, max_width, max_height)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
@@ -59,7 +61,7 @@ class Processor:
             self.logger.stop_resizing(overall_output_weight)
         return output_files
 
-    def crop_all(self, files: list = None):
+    def crop_all(self, files: list = None, ratio: float = None):
         if files is None:
             files: list = list(filter(self.is_image, os.listdir(self.directory)))
             files = list(map(lambda f: f'{self.directory}/{f}', files))
@@ -73,7 +75,7 @@ class Processor:
         pool: multiprocessing.Pool = multiprocessing.Pool()
         overall_output_weight: int = 0
         for file in files:
-            results.append(pool.apply_async(self.cropper.crop_image, (file,)))
+            results.append(pool.apply_async(self.cropper.crop_image, (file, ratio)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
@@ -82,6 +84,31 @@ class Processor:
             output_files.append(file)
         if self.logger is not None:
             self.logger.stop_cropping(overall_output_weight)
+        return output_files
+
+    def paste_all(self, files: list = None, ratio: float = None):
+        if files is None:
+            files: list = list(filter(self.is_image, os.listdir(self.directory)))
+            files = list(map(lambda f: f'{self.directory}/{f}', files))
+        if self.logger is not None:
+            self.logger.start_pasting(len(files), self.get_overall_size(files))
+        print('Paste in progress...')
+        self.progress: ProgressBar = ProgressBar(len(files))
+        self.progress.show()
+        output_files: list = []
+        results: list = []
+        pool: multiprocessing.Pool = multiprocessing.Pool()
+        overall_output_weight: int = 0
+        for file in files:
+            results.append(pool.apply_async(self.paster.make_image, (file, ratio)))
+        for result in results:
+            file: str = result.get(timeout=10)
+            self.progress.inc()
+            self.progress.show()
+            overall_output_weight += os.path.getsize(file)
+            output_files.append(file)
+        if self.logger is not None:
+            self.logger.stop_pasting(overall_output_weight)
         return output_files
 
     def compress_all(self, files: list = None):
