@@ -1,121 +1,126 @@
-import aiohttp
-import os
-import time
-import mimetypes
+from io import BytesIO
+from PIL import Image
+import mozjpeg_lossless_optimization
+import typing
+import PIL.Image
+from PIL.JpegImagePlugin import JpegImageFile
+from SSIM_PIL import compare_ssim
+import math
+import subprocess
 import re
-from .cycle_iterator import CycleIterator
-from .errors import Error, TinyPNGAccountError
-from .progress_bar import ProgressBar
+import mimetypes
+import os
+import pathlib
 from .logger import Logger
+from .progress_bar import ProgressBar
 
 
 class Compressor:
-    session: aiohttp.ClientSession
-
-    def __init__(self, api_keys: list or str,
+    def __init__(self,
                  output_directory: str = None,
-                 retry_count: int = 5,
-                 delay_time: int = 1000,
+                 quality: float = None,
+                 compressor: str = None,
+                 dynamic_quality_range: typing.Tuple[int, int] = (80, 85),
+                 use_gpu: bool = False,
                  logger: Logger = None):
-        if type(api_keys) == str:
-            self.api_keys: CycleIterator = CycleIterator([api_keys])
-        else:
-            self.api_keys: CycleIterator = CycleIterator(api_keys)
-        self.output_directory: str = output_directory
+        self.__supported_types: typing.Tuple[str, ...] = ('jpeg',)
+        self.__quality: float or None = quality
+        if compressor.lower() not in ('mozjpeg', 'leanify', None):
+            raise TypeError(f'Unsupported compressor "{compressor}".\n'
+                            f'Supported:\n'
+                            f'mozjpeg\n'
+                            f'leanify\n'
+                            f'None (only quality optimize)')
+        self.__compressor: str or None = compressor
+        if dynamic_quality_range[0] >= dynamic_quality_range[1]:
+            raise TypeError('The first value "dynamic_quality_range" must be < the second value.')
+        self.__dynamic_quality_range: typing.Tuple[int, int] = dynamic_quality_range
+        self.__output_directory: str = output_directory
+        self.__use_gpu: bool = use_gpu
+        self.__logger: Logger = logger
         if output_directory is not None:
             if not os.path.exists(output_directory):
                 os.mkdir(output_directory)
-        self.retry_count: int = retry_count
-        self.delay_time: int = delay_time
-        self.logger: Logger = logger
-        self.compressed_files: set = set()
 
-    async def create_web_session(self):
-        try:
-            key: str = next(self.api_keys)
-            self.session: aiohttp.ClientSession = aiohttp.ClientSession(auth=aiohttp.BasicAuth('api', key))
-            if not await self.__validate_api_key():
-                await self.session.close()
-                await self.create_web_session()
-        except StopIteration:
-            raise RuntimeError('No valid API keys found or keys have reached the images processing limit.')
-
-    async def compress(self, path: str, progress: ProgressBar = None):
-        if not hasattr(self, 'session'):
-            raise RuntimeError('Web session was not created. Use .create_web_session () before compressing.')
-        if not self.is_compression_supported(path):
-            await self.session.close()
-            raise TypeError(f'Extension "{os.path.splitext(path)[1]}" not supported by compressor.')
-        output_url: str = await self.__upload_image(path)
-        input_size: int = os.path.getsize(path)
-        if self.output_directory is not None:
-            output_path: str = f'{self.output_directory}/{os.path.basename(path)}'
+    def compress(self, path: str, progress: ProgressBar = None) -> str:
+        if not os.path.exists(path):
+            raise RuntimeError('File not found!')
+        file_type: str = str(mimetypes.guess_type(path)[0])
+        if not bool(re.fullmatch('.*/jpeg', file_type)):
+            raise TypeError(f'Compressor does not support "{file_type}" type.')
+        if self.__output_directory is not None:
+            output_path: str = f'{self.__output_directory}/{os.path.basename(path)}'
         else:
             output_path: str = path
-        await self.__download_image(output_url, output_path)
-        self.compressed_files.add(path)
-        if self.logger is not None:
-            self.logger.compressing_massage(path, input_size, os.path.getsize(output_path))
+        input_size: int = os.path.getsize(path)
+        jpeg_io: BytesIO = BytesIO()
+        with Image.open(path, "r") as image:
+            if self.__quality is None:
+                quality, default_ssim = self.__get_dynamic_quality_for_jpeg(image)
+            image.convert("RGB").save(jpeg_io, format="JPEG", quality=quality, optimize=False, progressive=True)
+        jpeg_io.seek(0)
+        jpeg_bytes: bytes = jpeg_io.read()
+        if self.__compressor == 'mozjpeg':
+            jpeg_bytes = mozjpeg_lossless_optimization.optimize(jpeg_bytes)
+        with open(output_path, "wb") as output_file:
+            output_file.write(jpeg_bytes)
+        if self.__compressor == 'leanify':
+            subprocess.run([pathlib.Path('ImageProcessor/bin/Leanify.exe'), output_path],
+                           shell=True,
+                           capture_output=True)
         if progress is not None:
             progress.inc()
             progress.show()
+        if self.__logger is not None:
+            self.__logger.compressing_massage(path, input_size, os.path.getsize(output_path))
+        return output_path
 
-    async def __upload_image(self, path: str, retry: int = 0) -> str:
-        with open(path, 'rb') as file:
-            data: bytes = file.read()
-            response: aiohttp.ClientResponse = await self.session.post('https://api.tinify.com/shrink/', data=data)
-            if response.status != 201:
-                if response.status == 401 or response.status == 429:
-                    raise TinyPNGAccountError(f'\nAPI key "{self.api_keys.element}" is not valid or '
-                                              f'the key\'s imaging limit has been reached.')
-                if response.status >= 500 and retry < self.retry_count:
-                    time.sleep(self.delay_time / 1000)
-                    return await self.__upload_image(path, retry + 1)
-                else:
-                    try:
-                        details: dict = await response.json()
-                    except Exception as err:
-                        details: dict = {'message': 'Error while parsing response: {0}'.format(err),
-                                         'error': 'ParseError'}
-                    raise Error.create(details.get('message'), details.get('error'), response.status)
-            response: dict = await response.json()
-            return response['output']['url']
+    def is_compression_supported(self, file_name: str) -> bool:
+        result: bool = False
+        for t in self.__supported_types:
+            t: str
+            result |= bool(re.fullmatch(r'.*/{0}'.format(t), str(mimetypes.guess_type(file_name)[0])))
+        return result
 
-    async def __download_image(self, url: str, output_path: str):
-        response: aiohttp.ClientResponse = await self.session.get(url)
-        if response.status == 200:
-            with open(output_path, 'wb') as file:
-                data: bytes = await response.read()
-                file.write(data)
-        else:
-            error_text: str = f'\nError downloading image. Status code: {response.status}'
-            print(error_text)
-            if self.logger is not None:
-                self.logger.error_message(error_text)
+    def get_supported_types(self):
+        return self.__supported_types
 
-    async def __validate_api_key(self, retry: int = 0) -> bool:
-        response: aiohttp.ClientResponse = await self.session.post('https://api.tinify.com/shrink/')
-        if response.status != 400:
-            if response.status >= 500 and retry < self.retry_count:
-                time.sleep(self.delay_time / 1000)
-                return await self.__validate_api_key(retry + 1)
-            elif response.status == 401 or response.status == 429:
-                error_text: str = f'\nAPI key "{self.api_keys.element}" is not valid or ' \
-                                  f'the key\'s imaging limit has been reached.'
-                print(error_text)
-                if self.logger is not None:
-                    self.logger.error_message(error_text)
-                self.api_keys.delete(self.api_keys.element)
-                return False
+    def __get_dynamic_quality_for_jpeg(self, original_image: JpegImageFile) -> typing.Tuple[int or None, float or None]:
+        ssim_goal: float = 0.95
+        height: int = self.__dynamic_quality_range[1]
+        low: int = self.__dynamic_quality_range[0]
+        image: PIL.Image.Image = original_image.resize((400, 400))
+        normalized_ssim: float = self.__get_ssim_at_quality(image, 95, self.__use_gpu)
+        selected_quality: int or None = None
+        selected_ssim: int or None = None
+        for i in range(self.__ssim_iteration_count(low, height)):
+            i: int
+            curr_quality: int = (low + height) // 2
+            curr_ssim: float = self.__get_ssim_at_quality(image, curr_quality, self.__use_gpu)
+            ssim_ratio: float = curr_ssim / normalized_ssim
+            if ssim_ratio >= ssim_goal:
+                selected_quality = curr_quality
+                selected_ssim = curr_ssim
+                height: int = curr_quality
             else:
-                try:
-                    details: dict = await response.json()
-                except Exception as err:
-                    details: dict = {'message': 'Error while parsing response: {0}'.format(err), 'error': 'ParseError'}
-                raise Error.create(details.get('message'), details.get('error'), response.status)
-        return True
+                low: int = curr_quality
+        if selected_quality:
+            return selected_quality, selected_ssim
+        else:
+            default_ssim: float = self.__get_ssim_at_quality(image, height, self.__use_gpu)
+            return height, default_ssim
 
     @staticmethod
-    def is_compression_supported(file_name: str) -> bool:
-        return bool(re.fullmatch('.*/png', str(mimetypes.guess_type(file_name)[0]))) \
-               or bool(re.fullmatch('.*/jpeg', str(mimetypes.guess_type(file_name)[0])))
+    def __get_ssim_at_quality(image: PIL.Image.Image, quality: int, use_gpu: bool = False) -> float:
+        ssim_photo: BytesIO = BytesIO()
+        image.save(ssim_photo, format="JPEG", quality=quality, progressive=True)
+        ssim_photo.seek(0)
+        ssim_score: float = compare_ssim(image, PIL.Image.open(ssim_photo), GPU=use_gpu)
+        return ssim_score
+
+    @staticmethod
+    def __ssim_iteration_count(low: int, height: int) -> int:
+        if low >= height:
+            return 0
+        else:
+            return int(math.log(height - low, 2)) + 1

@@ -105,7 +105,9 @@ class Logger:
                    f'Total output size: {round(self.overall_output_weight / (1024 ** 2), 2)}MB '
                    f'-{round(100 - (self.overall_output_weight / self.overall_input_weight * 100), 2)}%.')
 
-    def stop_compressing(self):
+    def stop_compressing(self, overall_output_weight):
+        if overall_output_weight is not None:
+            self.overall_output_weight = overall_output_weight
         time: float = self.timer.stop()
         self.write(f'\n\nCompressing complete. '
                    f'Elapsed time: {round(time, 2)}s. '

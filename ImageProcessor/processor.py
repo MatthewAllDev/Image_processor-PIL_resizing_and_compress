@@ -1,4 +1,5 @@
 import types
+import typing
 import re
 import os
 import mimetypes
@@ -7,7 +8,8 @@ import multiprocessing
 from .resizer import Resizer
 from .cropper import Cropper
 from .paster import Paster
-from .compressor import Compressor
+from .compressor_tiny_png import Compressor as CompressorTinyPng
+from .compressor import Compressor as LocalCompressor
 from .progress_bar import ProgressBar
 from .logger import Logger
 from .errors import TinyPNGAccountError
@@ -22,8 +24,13 @@ class Processor:
                  max_width: int = None,
                  max_height: int = None,
                  ratio: float = None,
+                 quality: int or None = None,
+                 compressor: str or None = 'leanify',
+                 dynamic_quality_range: typing.Tuple[int, int] = (80, 85),
+                 use_gpu_for_compress: bool = False,
                  tiny_png_api_key: list or str = None,
                  write_log: bool = False):
+        self.__mp_pool: multiprocessing.Pool = multiprocessing.Pool()
         self.directory: str = directory
         self.has_key_error: bool = False
         if write_log:
@@ -34,7 +41,13 @@ class Processor:
         self.cropper: Cropper = Cropper(output_directory, ratio, self.logger)
         self.paster: Paster = Paster(output_directory, ratio, self.logger)
         if tiny_png_api_key is not None:
-            self.compressor: Compressor = Compressor(tiny_png_api_key, logger=self.logger)
+            self.tiny_png_compressor: CompressorTinyPng = CompressorTinyPng(tiny_png_api_key, logger=self.logger)
+        self.local_compressor: LocalCompressor = LocalCompressor(output_directory,
+                                                                 quality,
+                                                                 compressor,
+                                                                 dynamic_quality_range,
+                                                                 use_gpu_for_compress,
+                                                                 self.logger)
 
     def resize_all(self, files: list = None, max_width: int = None, max_height: int = None) -> list:
         if files is None:
@@ -47,10 +60,9 @@ class Processor:
         self.progress.show()
         output_files: list = []
         results: list = []
-        pool: multiprocessing.Pool = multiprocessing.Pool()
         overall_output_weight: int = 0
         for file in files:
-            results.append(pool.apply_async(self.resizer.resize, (file, max_width, max_height)))
+            results.append(self.__mp_pool.apply_async(self.resizer.resize, (file, max_width, max_height)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
@@ -72,10 +84,9 @@ class Processor:
         self.progress.show()
         output_files: list = []
         results: list = []
-        pool: multiprocessing.Pool = multiprocessing.Pool()
         overall_output_weight: int = 0
         for file in files:
-            results.append(pool.apply_async(self.cropper.crop_image, (file, ratio)))
+            results.append(self.__mp_pool.apply_async(self.cropper.crop_image, (file, ratio)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
@@ -97,10 +108,9 @@ class Processor:
         self.progress.show()
         output_files: list = []
         results: list = []
-        pool: multiprocessing.Pool = multiprocessing.Pool()
         overall_output_weight: int = 0
         for file in files:
-            results.append(pool.apply_async(self.paster.make_image, (file, ratio)))
+            results.append(self.__mp_pool.apply_async(self.paster.make_image, (file, ratio)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
@@ -111,51 +121,82 @@ class Processor:
             self.logger.stop_pasting(overall_output_weight)
         return output_files
 
-    def compress_all(self, files: list = None):
+    def compress_all(self, files: list = None) -> list:
+        if files is None:
+            files: list = list(filter(self.is_image, os.listdir(self.directory)))
+            files = list(map(lambda f: f'{self.directory}/{f}', files))
+        files = self.__validate_files_to_compress(files, self.local_compressor)
+        if self.logger is not None:
+            self.logger.start_compressing(len(files), self.get_overall_size(files))
+        print('Compression in progress...')
+        self.progress: ProgressBar = ProgressBar(len(files))
+        self.progress.show()
+        output_files: list = []
+        results: list = []
+        overall_output_weight: int = 0
+        for file in files:
+            results.append(self.__mp_pool.apply_async(self.local_compressor.compress, (file,)))
+        for result in results:
+            file: str = result.get(timeout=10)
+            self.progress.inc()
+            self.progress.show()
+            overall_output_weight += os.path.getsize(file)
+            output_files.append(file)
+        if self.logger is not None:
+            self.logger.stop_compressing(overall_output_weight)
+        return output_files
+
+    def compress_all_tiny_png(self, files: list = None):
         if not hasattr(self, 'compressor'):
             raise AttributeError('"tiny_png_api_key" must be defined when instantiating "Processor" class.')
         if files is None:
             files: list = list(filter(self.is_image, os.listdir(self.directory)))
             files = list(map(lambda f: f'{self.directory}/{f}', files))
-        files = self.__validate_files_to_compress(files)
+        files = self.__validate_files_to_compress(files, self.tiny_png_compressor)
         if self.logger is not None:
             self.logger.start_compressing(len(files), self.get_overall_size(files))
-        asyncio.get_event_loop().run_until_complete(self.async_compress_all(files))
+        asyncio.get_event_loop().run_until_complete(self.async_compress_all_tiny_png(files))
         if self.logger is not None:
             self.logger.stop_compressing()
 
-    async def async_compress_all(self, files: list, continuation: bool = False):
-        self.compressor.compressed_files = set()
-        if not hasattr(self.compressor, 'session') or self.compressor.session.closed:
-            await self.compressor.create_web_session()
+    async def async_compress_all_tiny_png(self, files: list, continuation: bool = False):
+        self.tiny_png_compressor.compressed_files = set()
+        if not hasattr(self.tiny_png_compressor, 'session') or self.tiny_png_compressor.session.closed:
+            await self.tiny_png_compressor.create_web_session()
         if not continuation:
             print('\nCompress in progress...')
             self.progress: ProgressBar = ProgressBar(len(files))
             self.progress.show()
         tasks: set = set()
         for file in files:
-            tasks.add(asyncio.create_task(self.exception_wrapper(self.compressor.compress(file, self.progress))))
+            tasks.add(
+                asyncio.create_task(self.exception_wrapper(self.tiny_png_compressor.compress(file, self.progress))))
         await asyncio.wait(tasks)
         if self.has_key_error:
-            await self.compressor.session.close()
+            await self.tiny_png_compressor.session.close()
             self.has_key_error = False
         not_processed_files: list = self.__check_compressed_files(files)
         if len(not_processed_files) != 0:
-            await self.async_compress_all(not_processed_files, True)
+            await self.async_compress_all_tiny_png(not_processed_files, True)
         else:
-            await self.compressor.session.close()
+            await self.tiny_png_compressor.session.close()
 
     def __check_compressed_files(self, files: list) -> list:
         files_set: set = set(files)
-        if self.compressor.compressed_files == files_set:
+        if self.tiny_png_compressor.compressed_files == files_set:
             return []
         else:
-            return list(files_set.difference(self.compressor.compressed_files))
+            return list(files_set.difference(self.tiny_png_compressor.compressed_files))
 
-    def __validate_files_to_compress(self, files: list) -> list:
+    def __validate_files_to_compress(self, files: list, compressor: CompressorTinyPng or LocalCompressor) -> list:
         for file in files.copy():
-            if not self.compressor.is_compression_supported(file):
-                error_text: str = f'\n{file} not supported by compressor. Only jpeg and png files.'
+            if not compressor.is_compression_supported(file):
+                supported_types: tuple = compressor.get_supported_types()
+                supported_types_str: str = ''
+                for t in supported_types[:-1]:
+                    supported_types_str += f'{t}, '
+                supported_types_str += supported_types[-1]
+                error_text: str = f'\n{file} not supported by compressor. Only {supported_types_str} files.'
                 print(error_text)
                 if self.logger is not None:
                     self.logger.error_message(error_text)
