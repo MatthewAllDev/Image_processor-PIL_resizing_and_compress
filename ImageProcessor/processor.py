@@ -21,8 +21,11 @@ class Processor:
     def __init__(self,
                  output_directory: str = 'output',
                  directory: str = '',
-                 max_width: int = None,
-                 max_height: int = None,
+                 width: int = None,
+                 height: int = None,
+                 stretch: bool = False,
+                 save_proportions: bool = True,
+                 auto_orientation: bool = False,
                  ratio: float = None,
                  quality: int or None = None,
                  compressor: str or None = 'leanify',
@@ -37,7 +40,8 @@ class Processor:
             self.logger: Logger = Logger(f'{output_directory}/log.txt')
         else:
             self.logger: None = None
-        self.resizer: Resizer = Resizer(output_directory, max_width, max_height, logger=self.logger)
+        self.resizer: Resizer = Resizer(output_directory, width, height, stretch, save_proportions, auto_orientation,
+                                        logger=self.logger)
         self.cropper: Cropper = Cropper(output_directory, ratio, self.logger)
         self.paster: Paster = Paster(output_directory, ratio, self.logger)
         if tiny_png_api_key is not None:
@@ -49,7 +53,8 @@ class Processor:
                                                                  use_gpu_for_compress,
                                                                  self.logger)
 
-    def resize_all(self, files: list = None, max_width: int = None, max_height: int = None) -> list:
+    def resize_all(self, files: list = None, width: int = None, height: int = None, stretch: bool = None,
+                   save_proportions: bool = None, auto_orientation: bool = None) -> list:
         if files is None:
             files: list = list(filter(self.is_image, os.listdir(self.directory)))
             files = list(map(lambda f: f'{self.directory}/{f}', files))
@@ -62,7 +67,8 @@ class Processor:
         results: list = []
         overall_output_weight: int = 0
         for file in files:
-            results.append(self.__mp_pool.apply_async(self.resizer.resize, (file, max_width, max_height)))
+            results.append(self.__mp_pool.apply_async(self.resizer.resize, (file, width, height, stretch,
+                                                                            save_proportions, auto_orientation)))
         for result in results:
             file: str = result.get(timeout=10)
             self.progress.inc()
