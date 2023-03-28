@@ -25,7 +25,7 @@ class Compressor:
                  logger: Logger = None):
         self.__supported_types: typing.Tuple[str, ...] = ('jpeg',)
         self.__quality: float or None = quality
-        if compressor.lower() not in ('mozjpeg', 'leanify', None):
+        if compressor not in ('mozjpeg', 'leanify', None):
             raise TypeError(f'Unsupported compressor "{compressor}".\n'
                             f'Supported:\n'
                             f'mozjpeg\n'
