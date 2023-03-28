@@ -73,7 +73,7 @@ class Resizer:
             elif height is None:
                 height: int = h
         if (w * h > width * height) or stretch:
-            original_image.resize((width, height))
+            original_image = original_image.resize((width, height))
         original_image.save(output_path)
         if self.logger is not None:
             self.logger.resizing_message(path, (h, w), (height, width), input_size, os.path.getsize(output_path))

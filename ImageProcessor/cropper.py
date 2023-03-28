@@ -9,21 +9,25 @@ class Cropper:
     def __init__(self,
                  output_directory: str = None,
                  ratio: float = None,
+                 auto_orientation: bool = False,
                  logger: Logger = None):
         self.output_directory: str = output_directory
         self.ratio: float = ratio
+        self.auto_orientation: bool = auto_orientation
         self.logger: Logger = logger
         if output_directory is not None:
             if not os.path.exists(output_directory):
                 os.mkdir(output_directory)
 
-    def crop_image(self, path: str, ratio: float = None) -> str:
+    def crop_image(self, path: str, ratio: float = None, auto_orientation: bool = None) -> str:
         if not ratio:
             ratio: float = self.ratio
             if not self.ratio:
                 raise RuntimeError('Ratio not set!')
         if not os.path.exists(path):
             raise RuntimeError('File not found!')
+        if auto_orientation is None:
+            auto_orientation: bool = self.auto_orientation
         if self.output_directory is not None:
             output_path: str = f'{self.output_directory}/{os.path.basename(path)}'
         else:
@@ -34,9 +38,15 @@ class Cropper:
         width: int
         channels: int
         height, width, channels = img.shape
+        if auto_orientation:
+            if (ratio < 1) == (width / height > 1):
+                ratio = 1 / ratio
         target_width: int
         target_height: int
         target_width, target_height = Cropper.get_new_size(width, height, ratio)
+        if target_height is None and target_width is None:
+            cv2.imwrite(output_path, img)
+            return output_path
         contour: dict = self.get_contour(img)
         if (contour['width'] < width or contour['height'] < height) and self.logger is not None:
             self.logger.write(f'\nWARNING: Cropping {path} could be affected important elements')
@@ -81,6 +91,8 @@ class Cropper:
             return width, new_height
         elif new_height > height:
             return new_width, height
+        else:
+            return None, None
 
     @staticmethod
     def join_all_contours(contours: list) -> dict:
