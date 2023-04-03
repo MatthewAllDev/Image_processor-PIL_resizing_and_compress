@@ -1,6 +1,6 @@
 import os
 import cv2
-from numpy import ndarray
+from numpy import ndarray, asarray, uint8
 import math
 from .logger import Logger
 
@@ -32,7 +32,10 @@ class Cropper:
             output_path: str = f'{self.output_directory}/{os.path.basename(path)}'
         else:
             output_path: str = path
-        img: ndarray = cv2.imread(path)
+        with open(path, 'rb') as file:
+            data: bytes = bytearray(file.read())
+        data: ndarray = asarray(data, dtype=uint8)
+        img: ndarray = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
         input_size: int = os.path.getsize(path)
         height: int
         width: int
@@ -45,14 +48,16 @@ class Cropper:
         target_height: int
         target_width, target_height = Cropper.get_new_size(width, height, ratio)
         if target_height is None and target_width is None:
-            cv2.imwrite(output_path, img)
+            _, im_buf_arr = cv2.imencode(".jpg", img)
+            im_buf_arr.tofile(output_path)
             return output_path
         contour: dict = self.get_contour(img)
         if (contour['width'] < width or contour['height'] < height) and self.logger is not None:
             self.logger.write(f'\nWARNING: Cropping {path} could be affected important elements')
         crop_data: dict = Cropper.get_crop_coordinates((width, height), (target_width, target_height), contour)
         crop = img[crop_data['y_start']:crop_data['y_finish'], crop_data['x_start']:crop_data['x_finish']]
-        cv2.imwrite(output_path, crop)
+        _, im_buf_arr = cv2.imencode(".jpg", crop)
+        im_buf_arr.tofile(output_path)
         if self.logger is not None:
             self.logger.cropping_message(path, (height, width), (target_height, target_width),
                                          input_size, os.path.getsize(output_path))
