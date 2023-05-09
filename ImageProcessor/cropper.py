@@ -155,6 +155,9 @@ class Cropper:
                 else:
                     w_space: int = math.ceil(w_space / 2)
                 coordinates['x_finish'] = contour['x_finish'] + w_space
+                if coordinates['x_finish'] > original_size[0]:
+                    coordinates['x_start'] = coordinates['x_start'] - (coordinates['x_finish'] - original_size[0])
+                    coordinates['x_finish'] = original_size[0]
             else:
                 coordinates['x_finish'] = contour['x_finish'] + w_space
                 coordinates['x_start'] = contour['x_start']
